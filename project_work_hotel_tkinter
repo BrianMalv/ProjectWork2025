@@ -543,7 +543,7 @@ class ReviewDashboard(tk.Tk):
 # =========================
 
 def main():
-    # dataset (file fisso: consegnalo insieme al progetto)
+    # dataset
     df = pd.read_csv("reviews_Hotel.csv")
 
     # Addestra modelli + salva risultati in /results
