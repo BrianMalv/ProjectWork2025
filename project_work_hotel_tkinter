@@ -39,6 +39,8 @@ random.seed(SEED)
 np.random.seed(SEED)
 
 
+
+
 # =========================
 # 1. UTILS
 # =========================
@@ -153,6 +155,143 @@ def plot_sentiment_curves(y_true, y_proba, pos_label, out_dir="results"):
     plt.close()
 
     return {"roc_auc": float(roc_auc), "average_precision": float(ap)}
+
+
+# =========================
+# 1. GENERAZIONE DATASET
+# =========================
+
+def generate_synthetic_reviews(n_samples: int = 500, random_state: int = 42) -> pd.DataFrame:
+
+
+    random.seed(random_state)
+    np.random.seed(random_state)
+
+    departments = ["Housekeeping", "Reception", "F&B"]
+    sentiments = ["pos", "neg"]
+
+    templates = {
+        "Housekeeping": {
+            "pos_titles": [
+                "Camera pulitissima",
+                "Ottimo servizio di pulizia",
+                "Stanza impeccabile",
+                "Pulizia eccellente",
+            ],
+            "pos_bodies": [
+                "La camera era sempre pulita e profumata, asciugamani cambiati ogni giorno.",
+                "Servizio di pulizia rapido e accurato, letto rifatto alla perfezione.",
+                "Bagno brillante e senza tracce di sporco, complimenti alle cameriere ai piani.",
+                "Pulizia della stanza davvero ottima, non ho trovato un granello di polvere.",
+            ],
+            "neg_titles": [
+                "Camera sporca",
+                "Pulizia insufficiente",
+                "Stanza trascurata",
+                "Deluso dalla pulizia",
+            ],
+            "neg_bodies": [
+                "Ho trovato polvere sui mobili e capelli nel bagno.",
+                "La camera non è stata rifatta un giorno su due, davvero inaccettabile.",
+                "Macchie sulle lenzuola e asciugamani non cambiati.",
+                "Pulizia molto approssimativa, pavimento appiccicoso e cestino non svuotato.",
+            ],
+        },
+        "Reception": {
+            "pos_titles": [
+                "Accoglienza perfetta",
+                "Staff gentilissimo",
+                "Check-in veloce",
+                "Reception cordiale",
+            ],
+            "pos_bodies": [
+                "Personale della reception molto disponibile e sorridente.",
+                "Check-in rapido e senza problemi, ci hanno dato anche ottimi consigli sulla città.",
+                "Ottima gestione del check-out, conto chiaro e nessun intoppo.",
+                "Reception aperta 24 ore su 24, sempre pronti ad aiutare.",
+            ],
+            "neg_titles": [
+                "Check-in lunghissimo",
+                "Reception poco disponibile",
+                "Problemi con il pagamento",
+                "Esperienza negativa al desk",
+            ],
+            "neg_bodies": [
+                "Ho dovuto aspettare più di mezz'ora per il check-in.",
+                "Personale poco cordiale, nessun sorriso e poca attenzione alle richieste.",
+                "Hanno sbagliato a registrare il pagamento e ho dovuto discutere per sistemare.",
+                "Informazioni confuse su tasse di soggiorno e orari, poca professionalità.",
+            ],
+        },
+        "F&B": {
+            "pos_titles": [
+                "Colazione fantastica",
+                "Ristorante eccellente",
+                "Ottimo buffet",
+                "Cibo delizioso",
+            ],
+            "pos_bodies": [
+                "Colazione abbondante con molta scelta di dolce e salato.",
+                "Ristorante dell'hotel davvero buono, piatti curati e servizio puntuale.",
+                "Buffet serale molto vario, qualità del cibo sopra la media.",
+                "Camerieri gentili e servizio veloce, cibo di ottima qualità.",
+            ],
+            "neg_titles": [
+                "Colazione scarsa",
+                "Ristorante deludente",
+                "Cibo freddo",
+                "Esperienza pessima al buffet",
+            ],
+            "neg_bodies": [
+                "Poca scelta a colazione, molti prodotti confezionati.",
+                "Il ristorante era caro e la qualità dei piatti non all'altezza.",
+                "Cibo servito tiepido e poco saporito.",
+                "Buffet quasi vuoto e piatti non riforniti, molto deludente.",
+            ],
+        },
+    }
+
+    ambiguous_bodies = [
+        "Camera pulita ma colazione deludente, non so se tornerei.",
+        "Check-in veloce ma la stanza aveva qualche problema.",
+        "Personale gentile alla reception, però il ristorante non mi ha convinto.",
+        "Colazione buona ma il bagno non era perfetto.",
+    ]
+
+    rows = []
+
+    for i in range(1, n_samples + 1):
+        dept = random.choice(departments)
+        sentiment = random.choice(sentiments)
+
+        dept_templates = templates[dept]
+
+        if sentiment == "pos":
+            title = random.choice(dept_templates["pos_titles"])
+            body = random.choice(dept_templates["pos_bodies"])
+        else:
+            title = random.choice(dept_templates["neg_titles"])
+            body = random.choice(dept_templates["neg_bodies"])
+
+        extra = ""
+        if random.random() < 0.15:
+            extra = " " + random.choice(ambiguous_bodies)
+
+        full_body = body + extra
+
+        rows.append(
+            {
+                "id": i,
+                "title": title,
+                "body": full_body,
+                "department": dept,
+                "sentiment": sentiment,
+            }
+        )
+
+    df = pd.DataFrame(rows)
+    return df
+
 
 
 # =========================
@@ -543,8 +682,18 @@ class ReviewDashboard(tk.Tk):
 # =========================
 
 def main():
-    # dataset
-    df = pd.read_csv("reviews_Hotel.csv")
+
+    datset_path = Path("reviews_Hotel.csv")
+    
+    if not os.path.exists(datset_path):
+        # Genera dataset sintetico
+        print("[INFO] Generazione dataset in corso...")
+        df_generated = generate_synthetic_reviews(n_samples=500, random_state=SEED)
+        df_generated.to_csv(datset_path, index=False, encoding="utf-8")
+        print("[INFO] Dataset generato e salvato in:", datset_path)
+
+    # dataset Fisso
+    df = pd.read_csv(datset_path)
 
     # Addestra modelli + salva risultati in /results
     vectorizer, dept_model, sent_model, metrics = train_models(df)
