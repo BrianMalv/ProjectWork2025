@@ -1,0 +1,558 @@
+import os
+import random
+import string
+from datetime import datetime
+import sys
+import platform
+import json
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
+    roc_curve,
+    auc,
+    precision_recall_curve,
+    average_precision_score,
+)
+import sklearn
+
+import joblib
+
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from pathlib import Path
+
+# =========================
+# 0. RIPRODUCIBILITÀ
+# =========================
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+
+
+# =========================
+# 1. UTILS
+# =========================
+
+def simple_preprocess(text: str) -> str:
+    """
+    Preprocessing minimale:
+    - minuscole
+    - rimozione punteggiatura
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    return text
+
+
+def plot_confusion_matrix(cm, class_names, title, filename):
+    """
+    Salva una confusion matrix come immagine PNG.
+    """
+    fig, ax = plt.subplots()
+    im = ax.imshow(cm, interpolation="nearest")
+    ax.figure.colorbar(im, ax=ax)
+    ax.set(
+        xticks=np.arange(cm.shape[1]),
+        yticks=np.arange(cm.shape[0]),
+        xticklabels=class_names,
+        yticklabels=class_names,
+        ylabel="True label",
+        xlabel="Predicted label",
+        title=title,
+    )
+
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+    fmt = "d"
+    thresh = cm.max() / 2.0 if cm.size else 0
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(
+                j,
+                i,
+                format(cm[i, j], fmt),
+                ha="center",
+                va="center",
+                color="white" if cm[i, j] > thresh else "black",
+            )
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    plt.savefig(filename, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_environment_info(out_dir="results"):
+    """
+    Salva info utili per riproducibilità: OS, Python, sklearn, ecc.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    info = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "numpy_version": np.__version__,
+        "pandas_version": pd.__version__,
+        "sklearn_version": sklearn.__version__,
+        "seed": SEED,
+    }
+    with open(os.path.join(out_dir, "environment.json"), "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
+
+
+def _get_binary_positive_label(classes):
+    """
+    Heuristica: se esiste 'pos' usala, altrimenti la seconda classe.
+    """
+    classes = list(classes)
+    if "pos" in classes:
+        return "pos"
+    # fallback: assume classes ordinate
+    return classes[1] if len(classes) > 1 else classes[0]
+
+
+def plot_sentiment_curves(y_true, y_proba, pos_label, out_dir="results"):
+    """
+    Salva ROC e Precision-Recall per sentiment binario.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ROC
+    fpr, tpr, _ = roc_curve(y_true, y_proba, pos_label=pos_label)
+    roc_auc = auc(fpr, tpr)
+    plt.figure()
+    plt.plot(fpr, tpr)
+    plt.plot([0, 1], [0, 1], linestyle="--")
+    plt.title(f"ROC - Sentiment (AUC={roc_auc:.3f})")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.savefig(os.path.join(out_dir, "roc_sentiment.png"), bbox_inches="tight")
+    plt.close()
+
+    # Precision-Recall
+    precision, recall, _ = precision_recall_curve(y_true, y_proba, pos_label=pos_label)
+    ap = average_precision_score(y_true, y_proba, pos_label=pos_label)
+    plt.figure()
+    plt.plot(recall, precision)
+    plt.title(f"Precision-Recall - Sentiment (AP={ap:.3f})")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.savefig(os.path.join(out_dir, "pr_sentiment.png"), bbox_inches="tight")
+    plt.close()
+
+    return {"roc_auc": float(roc_auc), "average_precision": float(ap)}
+
+
+# =========================
+# 2. PIPELINE ML
+# =========================
+
+def train_models(df: pd.DataFrame):
+    """
+    Addestra i modelli per:
+    - department (multiclasse)
+    - sentiment (binario)
+    Restituisce: vectorizer, dept_model, sent_model, metrics_dict
+    Produce anche: risultati salvati in /results (tabelle + grafici + split + modelli)
+    """
+    os.makedirs("results", exist_ok=True)
+    save_environment_info("results")
+
+    # Testo unificato + preprocess
+    df = df.copy()
+    df["title"] = df.get("title", "").fillna("")
+    df["body"] = df.get("body", "").fillna("")
+    df["text"] = (df["title"] + " " + df["body"]).apply(simple_preprocess)
+
+    # Target
+    X_text = df["text"].values
+    y_dept = df["department"].values
+    y_sent = df["sentiment"].values
+
+    # Stratificazione combinata (department + sentiment) per split più stabile
+    # Se alcune combinazioni hanno pochissimi esempi, potrebbe fallire: in quel caso si ripiega su department.
+    stratify_key = (df["department"].astype(str) + "_" + df["sentiment"].astype(str)).values
+    try:
+        X_train, X_test, y_dept_train, y_dept_test, y_sent_train, y_sent_test = train_test_split(
+            X_text, y_dept, y_sent,
+            test_size=0.2,
+            random_state=SEED,
+            stratify=stratify_key
+        )
+        used_stratify = "department+sentiment"
+    except ValueError:
+        X_train, X_test, y_dept_train, y_dept_test, y_sent_train, y_sent_test = train_test_split(
+            X_text, y_dept, y_sent,
+            test_size=0.2,
+            random_state=SEED,
+            stratify=y_dept
+        )
+        used_stratify = "department"
+
+    # Salva split per riproducibilità
+    pd.DataFrame({
+        "text": X_train,
+        "department": y_dept_train,
+        "sentiment": y_sent_train
+    }).to_csv("results/train_split.csv", index=False, encoding="utf-8")
+
+    pd.DataFrame({
+        "text": X_test,
+        "department": y_dept_test,
+        "sentiment": y_sent_test
+    }).to_csv("results/test_split.csv", index=False, encoding="utf-8")
+
+    with open("results/split_info.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {"test_size": 0.2, "random_state": SEED, "stratify": used_stratify},
+            f, indent=2, ensure_ascii=False
+        )
+
+    # Vectorizer
+    vectorizer = TfidfVectorizer(
+        max_features=3000,
+        ngram_range=(1, 2),
+    )
+    X_train_vec = vectorizer.fit_transform(X_train)
+    X_test_vec = vectorizer.transform(X_test)
+
+    # Modelli (con random_state)
+    dept_clf = LogisticRegression(max_iter=300, multi_class="auto", random_state=SEED)
+    dept_clf.fit(X_train_vec, y_dept_train)
+
+    sent_clf = LogisticRegression(max_iter=300, random_state=SEED)
+    sent_clf.fit(X_train_vec, y_sent_train)
+
+    # =========================
+    # Valutazione: DEPARTMENT
+    # =========================
+    y_dept_pred = dept_clf.predict(X_test_vec)
+    dept_acc = accuracy_score(y_dept_test, y_dept_pred)
+    dept_f1_macro = f1_score(y_dept_test, y_dept_pred, average="macro")
+
+    dept_report_text = classification_report(y_dept_test, y_dept_pred)
+    dept_report_dict = classification_report(y_dept_test, y_dept_pred, output_dict=True)
+    pd.DataFrame(dept_report_dict).transpose().to_csv("results/report_department.csv", encoding="utf-8")
+
+    # Grafico F1 per classe - Department
+    rep_df = pd.DataFrame(dept_report_dict).transpose()
+
+    exclude = {"accuracy", "macro avg", "weighted avg"}
+    class_rows = [idx for idx in rep_df.index if idx not in exclude]
+    f1_values = rep_df.loc[class_rows, "f1-score"].astype(float)
+
+    plt.figure(figsize=(7, 4))
+    plt.bar(f1_values.index.astype(str), f1_values.values)
+    plt.ylim(0, 1.0)
+    plt.title("F1 per class - Department")
+    plt.ylabel("F1 score")
+    plt.xticks(rotation=0)
+    plt.savefig("results/f1_barre_department.png", bbox_inches="tight")
+    plt.close()
+
+    dept_classes = np.unique(y_dept)
+    cm_dept = confusion_matrix(y_dept_test, y_dept_pred, labels=dept_classes)
+    plot_confusion_matrix(
+        cm_dept,
+        class_names=dept_classes,
+        title="Confusion Matrix - Reparto",
+        filename=os.path.join("results", "confusion_matrix_department.png"),
+    )
+    pd.DataFrame(cm_dept, index=dept_classes, columns=dept_classes).to_csv(
+        "results/confusion_matrix_department.csv", encoding="utf-8"
+    )
+
+    # =========================
+    # Valutazione: SENTIMENT
+    # =========================
+    y_sent_pred = sent_clf.predict(X_test_vec)
+    sent_acc = accuracy_score(y_sent_test, y_sent_pred)
+    sent_f1_macro = f1_score(y_sent_test, y_sent_pred, average="macro")
+
+    sent_report_text = classification_report(y_sent_test, y_sent_pred)
+    sent_report_dict = classification_report(y_sent_test, y_sent_pred, output_dict=True)
+    pd.DataFrame(sent_report_dict).transpose().to_csv("results/report_sentiment.csv", encoding="utf-8")
+
+    # Grafico F1 per classe - Sentiment
+    rep_df_sent = pd.DataFrame(sent_report_dict).transpose()
+
+    exclude = {"accuracy", "macro avg", "weighted avg"}
+    class_rows = [idx for idx in rep_df_sent.index if idx not in exclude]
+    f1_values_sent = rep_df_sent.loc[class_rows, "f1-score"].astype(float)
+
+    plt.figure(figsize=(7, 4))
+    plt.bar(f1_values_sent.index.astype(str), f1_values_sent.values)
+    plt.ylim(0, 1.0)
+    plt.title("F1 per class - Sentiment")
+    plt.ylabel("F1 score")
+    plt.xticks(rotation=0)
+    plt.savefig("results/f1_barre_sentiment.png", bbox_inches="tight")
+    plt.close()
+
+    sent_classes = np.unique(y_sent)
+    cm_sent = confusion_matrix(y_sent_test, y_sent_pred, labels=sent_classes)
+    plot_confusion_matrix(
+        cm_sent,
+        class_names=sent_classes,
+        title="Confusion Matrix - Sentiment",
+        filename=os.path.join("results", "confusion_matrix_sentiment.png"),
+    )
+    pd.DataFrame(cm_sent, index=sent_classes, columns=sent_classes).to_csv(
+        "results/confusion_matrix_sentiment.csv", encoding="utf-8"
+    )
+    
+    # Curve ROC / PR se binario e predict_proba disponibile
+    curve_metrics = {}
+    if hasattr(sent_clf, "predict_proba") and len(sent_clf.classes_) == 2:
+        pos_label = _get_binary_positive_label(sent_clf.classes_)
+        y_proba_pos = sent_clf.predict_proba(X_test_vec)[:, list(sent_clf.classes_).index(pos_label)]
+        curve_metrics = plot_sentiment_curves(y_sent_test, y_proba_pos, pos_label=pos_label, out_dir="results")
+
+    # Salva modelli e vectorizer
+    joblib.dump(vectorizer, "results/tfidf_vectorizer.joblib")
+    joblib.dump(dept_clf, "results/dept_model.joblib")
+    joblib.dump(sent_clf, "results/sent_model.joblib")
+
+    # Salva metriche riassuntive
+    metrics = {
+        "dept_acc": float(dept_acc),
+        "dept_f1_macro": float(dept_f1_macro),
+        "sent_acc": float(sent_acc),
+        "sent_f1_macro": float(sent_f1_macro),
+        **curve_metrics,
+    }
+    pd.DataFrame([metrics]).to_csv("results/metrics_summary.csv", index=False, encoding="utf-8")
+
+    # Stampa a console (comodo durante lo sviluppo)
+    print("\n=== RISULTATI REPARTO ===")
+    print(f"Accuracy reparto: {dept_acc:.3f}")
+    print(f"F1 macro reparto: {dept_f1_macro:.3f}")
+    print(dept_report_text)
+
+    print("\n=== RISULTATI SENTIMENT ===")
+    print(f"Accuracy sentiment: {sent_acc:.3f}")
+    print(f"F1 macro sentiment: {sent_f1_macro:.3f}")
+    print(sent_report_text)
+
+    # Esempi di errori (max 5)
+    print("\n=== ESEMPI DI ERRORI (max 5) ===")
+    X_test_list = list(X_test)
+    count_errors = 0
+    for i, text in enumerate(X_test_list):
+        wrong_dept = y_dept_test[i] != y_dept_pred[i]
+        wrong_sent = y_sent_test[i] != y_sent_pred[i]
+        if wrong_dept or wrong_sent:
+            print("-" * 80)
+            print(f"Testo: {text}")
+            print(f"Reparto vero: {y_dept_test[i]} | Reparto predetto: {y_dept_pred[i]}")
+            print(f"Sentiment vero: {y_sent_test[i]} | Sentiment predetto: {y_sent_pred[i]}")
+            count_errors += 1
+        if count_errors >= 5:
+            break
+
+    return vectorizer, dept_clf, sent_clf, metrics
+
+
+# =========================
+# 3. DASHBOARD TKINTER
+# =========================
+
+class ReviewDashboard(tk.Tk):
+    def __init__(self, vectorizer, dept_model, sent_model, metrics):
+        super().__init__()
+
+        self.title("Hotel Reviews Routing & Sentiment - Project Work")
+        self.geometry("950x700")
+
+        self.vectorizer = vectorizer
+        self.dept_model = dept_model
+        self.sent_model = sent_model
+        self.metrics = metrics
+
+        self._build_ui()
+
+    def _build_ui(self):
+        # Sezione metriche
+        frame_metrics = tk.LabelFrame(self, text="Metriche modello (test set 20%)")
+        frame_metrics.pack(fill="x", padx=10, pady=10)
+
+        extra = ""
+        if "roc_auc" in self.metrics:
+            extra += f" | ROC AUC sentiment: {self.metrics['roc_auc']:.3f}"
+        if "average_precision" in self.metrics:
+            extra += f" | AP sentiment: {self.metrics['average_precision']:.3f}"
+
+        lbl_metrics = tk.Label(
+            frame_metrics,
+            text=(
+                f"Reparto -> Accuracy: {self.metrics['dept_acc']:.3f} | "
+                f"F1 macro: {self.metrics['dept_f1_macro']:.3f}    |    "
+                f"Sentiment -> Accuracy: {self.metrics['sent_acc']:.3f} | "
+                f"F1 macro: {self.metrics['sent_f1_macro']:.3f}"
+                f"{extra}"
+            ),
+        )
+        lbl_metrics.pack(anchor="w", padx=10, pady=5)
+
+        # Titolo recensione
+        lbl_title = tk.Label(self, text="Titolo recensione:")
+        lbl_title.pack(anchor="w", padx=10, pady=(10, 0))
+
+        self.entry_title = tk.Entry(self, width=120)
+        self.entry_title.pack(anchor="w", padx=10, pady=5)
+
+        # Testo recensione
+        lbl_body = tk.Label(self, text="Testo recensione:")
+        lbl_body.pack(anchor="w", padx=10, pady=(10, 0))
+
+        self.text_body = tk.Text(self, width=120, height=10)
+        self.text_body.pack(anchor="w", padx=10, pady=5)
+
+        # Bottoni
+        frame_buttons = tk.Frame(self)
+        frame_buttons.pack(anchor="w", padx=10, pady=10)
+
+        btn_predict = tk.Button(frame_buttons, text="Predici singola recensione", command=self.predict_single)
+        btn_predict.grid(row=0, column=0, padx=5)
+
+        btn_batch = tk.Button(frame_buttons, text="Predici da CSV", command=self.predict_from_csv)
+        btn_batch.grid(row=0, column=1, padx=5)
+
+        # Output
+        lbl_output = tk.Label(self, text="Output:")
+        lbl_output.pack(anchor="w", padx=10, pady=(10, 0))
+
+        self.text_output = tk.Text(self, width=120, height=14, state="disabled")
+        self.text_output.pack(anchor="w", padx=10, pady=5)
+
+    def predict_single(self):
+        title = self.entry_title.get().strip()
+        body = self.text_body.get("1.0", tk.END).strip()
+
+        if not title and not body:
+            messagebox.showwarning("Attenzione", "Inserisci almeno il titolo o il testo della recensione.")
+            return
+
+        combined = simple_preprocess(title + " " + body)
+        X_vec = self.vectorizer.transform([combined])
+
+        # Reparto
+        dept_probs = self.dept_model.predict_proba(X_vec)[0]
+        dept_classes = self.dept_model.classes_
+        dept_idx = int(dept_probs.argmax())
+        dept_pred = dept_classes[dept_idx]
+        dept_prob = float(dept_probs[dept_idx])
+
+        # Sentiment
+        sent_probs = self.sent_model.predict_proba(X_vec)[0]
+        sent_classes = self.sent_model.classes_
+        sent_idx = int(sent_probs.argmax())
+        sent_pred = sent_classes[sent_idx]
+        sent_prob = float(sent_probs[sent_idx])
+
+        sent_label_it = "Positivo" if str(sent_pred) == "pos" else "Negativo"
+
+        lines = []
+        lines.append(f"Reparto consigliato: {dept_pred} (probabilità {dept_prob:.2%})")
+        lines.append(f"Sentiment stimato: {sent_label_it} [{sent_pred}] (probabilità {sent_prob:.2%})")
+        lines.append("")
+        lines.append("Probabilità reparto:")
+        for cls, p in zip(dept_classes, dept_probs):
+            lines.append(f" - {cls}: {float(p):.2%}")
+        lines.append("")
+        lines.append("Probabilità sentiment:")
+        for cls, p in zip(sent_classes, sent_probs):
+            label_it = "Positivo" if str(cls) == "pos" else "Negativo"
+            lines.append(f" - {label_it} [{cls}]: {float(p):.2%}")
+
+        self.text_output.config(state="normal")
+        self.text_output.delete("1.0", tk.END)
+        self.text_output.insert(tk.END, "\n".join(lines))
+        self.text_output.config(state="disabled")
+
+    def predict_from_csv(self):
+        file_path = filedialog.askopenfilename(
+            title="Seleziona CSV di recensioni",
+            filetypes=[("File CSV", "*.csv")],
+        )
+        if not file_path:
+            return
+
+        try:
+            df = pd.read_csv(file_path)
+        except Exception as e:
+            messagebox.showerror("Errore", f"Impossibile leggere il file CSV: {e}")
+            return
+
+        required_cols = {"title", "body"}
+        if not required_cols.issubset(set(df.columns)):
+            messagebox.showerror(
+                "Errore",
+                f"Il CSV deve contenere almeno le colonne: {required_cols}",
+            )
+            return
+
+        df = df.copy()
+        df["text"] = (df["title"].fillna("") + " " + df["body"].fillna("")).apply(simple_preprocess)
+        X_vec = self.vectorizer.transform(df["text"].values)
+
+        # Reparto
+        dept_probs = self.dept_model.predict_proba(X_vec)
+        dept_classes = self.dept_model.classes_
+        dept_pred_idx = dept_probs.argmax(axis=1)
+        dept_pred = dept_classes[dept_pred_idx]
+        dept_pred_prob = dept_probs.max(axis=1)
+
+        # Sentiment
+        sent_probs = self.sent_model.predict_proba(X_vec)
+        sent_classes = self.sent_model.classes_
+        sent_pred_idx = sent_probs.argmax(axis=1)
+        sent_pred = sent_classes[sent_pred_idx]
+        sent_pred_prob = sent_probs.max(axis=1)
+
+        df["pred_department"] = dept_pred
+        df["pred_department_prob"] = dept_pred_prob
+        df["pred_sentiment"] = sent_pred
+        df["pred_sentiment_prob"] = sent_pred_prob
+
+        base, ext = os.path.splitext(file_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = f"{base}_predictions_{timestamp}.csv"
+        df.to_csv(out_path, index=False, encoding="utf-8")
+
+        messagebox.showinfo(
+            "Completato",
+            f"Predizioni salvate in:\n{out_path}",
+        )
+
+
+# =========================
+# 4. MAIN
+# =========================
+
+def main():
+    # dataset (file fisso: consegnalo insieme al progetto)
+    df = pd.read_csv("reviews_Hotel.csv")
+
+    # Addestra modelli + salva risultati in /results
+    vectorizer, dept_model, sent_model, metrics = train_models(df)
+
+    # Avvia dashboard Tkinter
+    app = ReviewDashboard(vectorizer, dept_model, sent_model, metrics)
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
