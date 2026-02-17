@@ -26,7 +26,6 @@ dist/project_work_hotel_tkinter.exe
 ```
 
 ## 5. Funzionamento
-- Generazione dataset sintetico (500 recensioni)
 - Addestramento modelli ML
 - Dashboard Tkinter
 - Predizione singola o tramite CSV
