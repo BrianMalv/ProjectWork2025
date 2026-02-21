@@ -21,146 +21,216 @@ from sklearn.metrics import (
     roc_curve,
     auc,
     precision_recall_curve,
-    average_precision_score,
 )
-import sklearn
-
-import joblib
 
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
-# =========================
-# 0. RIPRODUCIBILITÀ
-# =========================
+
+# ==================================================
+# CONFIG
+# ==================================================
 SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-
-
+RESULTS_DIR = "results"
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 
 # =========================
-# 1. UTILS
+# 0. UTILITIES
 # =========================
-
 def simple_preprocess(text: str) -> str:
-    """
-    Preprocessing minimale:
-    - minuscole
-    - rimozione punteggiatura
-    """
-    if not isinstance(text, str):
-        return ""
     text = text.lower()
-    text = text.translate(str.maketrans("", "", string.punctuation))
+    translator = str.maketrans("", "", string.punctuation)
+    text = text.translate(translator)
+    text = " ".join(text.split())
     return text
 
 
-def plot_confusion_matrix(cm, class_names, title, filename):
-    """
-    Salva una confusion matrix come immagine PNG.
-    """
-    fig, ax = plt.subplots()
-    im = ax.imshow(cm, interpolation="nearest")
-    ax.figure.colorbar(im, ax=ax)
-    ax.set(
-        xticks=np.arange(cm.shape[1]),
-        yticks=np.arange(cm.shape[0]),
-        xticklabels=class_names,
-        yticklabels=class_names,
-        ylabel="True label",
-        xlabel="Predicted label",
-        title=title,
-    )
+def plot_confusion_matrix(cm, labels, title, out_path_png, out_path_csv):
+    df_cm = pd.DataFrame(cm, index=labels, columns=labels)
+    df_cm.to_csv(out_path_csv, index=True)
 
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    plt.figure()
+    plt.imshow(cm, interpolation="nearest")
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(labels))
+    plt.xticks(tick_marks, labels, rotation=45, ha="right")
+    plt.yticks(tick_marks, labels)
+    plt.xlabel("Predetto")
+    plt.ylabel("Reale")
 
-    fmt = "d"
-    thresh = cm.max() / 2.0 if cm.size else 0
+    thresh = cm.max() / 2 if cm.max() > 0 else 0
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
-            ax.text(
+            plt.text(
                 j,
                 i,
-                format(cm[i, j], fmt),
+                format(cm[i, j], "d"),
                 ha="center",
                 va="center",
                 color="white" if cm[i, j] > thresh else "black",
             )
 
     plt.tight_layout()
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    plt.savefig(filename, bbox_inches="tight")
-    plt.close(fig)
+    plt.savefig(out_path_png, dpi=200, bbox_inches="tight")
+    plt.close()
 
 
-def save_environment_info(out_dir="results"):
-    """
-    Salva info utili per riproducibilità: OS, Python, sklearn, ecc.
-    """
-    os.makedirs(out_dir, exist_ok=True)
+def save_environment_info(out_dir: str, seed: int):
     info = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now().isoformat(),
         "python_version": sys.version,
         "platform": platform.platform(),
+        "seed": seed,
         "numpy_version": np.__version__,
         "pandas_version": pd.__version__,
-        "sklearn_version": sklearn.__version__,
-        "seed": SEED,
     }
-    with open(os.path.join(out_dir, "environment.json"), "w", encoding="utf-8") as f:
+    out_path = os.path.join(out_dir, "environment.json")
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2, ensure_ascii=False)
 
 
-def _get_binary_positive_label(classes):
-    """
-    Heuristica: se esiste 'pos' usala, altrimenti la seconda classe.
-    """
-    classes = list(classes)
-    if "pos" in classes:
+def _get_binary_positive_label(series: pd.Series) -> str:
+    # assume labels are "pos"/"neg" (but keep generic)
+    uniq = sorted(series.unique())
+    if "pos" in uniq:
         return "pos"
-    # fallback: assume classes ordinate
-    return classes[1] if len(classes) > 1 else classes[0]
+    return uniq[-1]
 
 
-def plot_sentiment_curves(y_true, y_proba, pos_label, out_dir="results"):
-    """
-    Salva ROC e Precision-Recall per sentiment binario.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
+def plot_sentiment_curves(y_true, y_prob, out_dir: str):
     # ROC
-    fpr, tpr, _ = roc_curve(y_true, y_proba, pos_label=pos_label)
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
     roc_auc = auc(fpr, tpr)
     plt.figure()
-    plt.plot(fpr, tpr)
+    plt.plot(fpr, tpr, label=f"AUC={roc_auc:.3f}")
     plt.plot([0, 1], [0, 1], linestyle="--")
-    plt.title(f"ROC - Sentiment (AUC={roc_auc:.3f})")
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.savefig(os.path.join(out_dir, "roc_sentiment.png"), bbox_inches="tight")
+    plt.title("ROC Curve - Sentiment")
+    plt.legend(loc="lower right")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "sentiment_roc.png"), dpi=200, bbox_inches="tight")
     plt.close()
 
     # Precision-Recall
-    precision, recall, _ = precision_recall_curve(y_true, y_proba, pos_label=pos_label)
-    ap = average_precision_score(y_true, y_proba, pos_label=pos_label)
+    precision, recall, _ = precision_recall_curve(y_true, y_prob)
+    pr_auc = auc(recall, precision)
     plt.figure()
-    plt.plot(recall, precision)
-    plt.title(f"Precision-Recall - Sentiment (AP={ap:.3f})")
+    plt.plot(recall, precision, label=f"AUC={pr_auc:.3f}")
     plt.xlabel("Recall")
     plt.ylabel("Precision")
-    plt.savefig(os.path.join(out_dir, "pr_sentiment.png"), bbox_inches="tight")
+    plt.title("Precision-Recall Curve - Sentiment")
+    plt.legend(loc="lower left")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "sentiment_pr.png"), dpi=200, bbox_inches="tight")
     plt.close()
 
-    return {"roc_auc": float(roc_auc), "average_precision": float(ap)}
+
+# =========================
+# 1B. "REALISMO" NEL DATASET SINTETICO (AMBIGUITÀ / MIXED / SINONIMI / RUMORE / TYPO)
+# =========================
+
+FILLERS = [
+    "onestamente", "in generale", "a dire il vero", "comunque", "diciamo", "sinceramente",
+    "per il resto", "tutto sommato", "tra l'altro"
+]
+
+SYNONYMS = {
+    "pulita": ["in ordine", "linda", "immacolata"],
+    "pulizia": ["igiene", "riordino", "sanificazione"],
+    "sporco": ["non pulito", "trascurato", "imbrattato"],
+    "camera": ["stanza", "camera da letto"],
+    "stanza": ["camera", "stanza da letto"],
+    "bagno": ["servizi", "toilette"],
+    "colazione": ["breakfast", "prima colazione"],
+    "ristorante": ["sala ristorante", "cucina"],
+    "personale": ["staff", "addetti"],
+    "reception": ["front desk", "accoglienza"],
+    "check-in": ["check in", "registrazione"],
+    "checkin": ["check in", "registrazione"],
+    "check-out": ["check out", "saldo"],
+    "checkout": ["check out", "saldo"],
+    "pagamento": ["saldo", "conto"],
+    "lento": ["macchinoso", "troppo lungo"],
+    "veloce": ["rapido", "spedito"],
+    "gentile": ["cordiale", "disponibile"],
+    "ottimo": ["eccellente", "davvero buono"],
+    "pessimo": ["scadente", "molto deludente"],
+}
+
+DEPT_KEYWORDS = {
+    "Housekeeping": ["pulizia", "stanza", "bagno", "asciugamani", "lenzuola", "polvere"],
+    "Reception": ["check-in", "check out", "reception", "pagamento", "saldo", "prenotazione"],
+    "F&B": ["colazione", "buffet", "ristorante", "cena", "bar", "caffè"]
+}
+
+def _apply_synonyms(text: str, p_syn: float = 0.35) -> str:
+    words = text.split()
+    out = []
+    for w in words:
+        key = w.lower().strip(".,;:!?()[]\"'")
+        if key in SYNONYMS and random.random() < p_syn:
+            rep = random.choice(SYNONYMS[key])
+            suffix = ""
+            if w and w[-1] in ".,;:!?":
+                suffix = w[-1]
+            out.append(rep + suffix)
+        else:
+            out.append(w)
+    return " ".join(out)
+
+def _inject_fillers(text: str, p_filler: float = 0.20) -> str:
+    if random.random() > p_filler:
+        return text
+    parts = text.split(",")
+    if len(parts) >= 2:
+        i = random.randrange(len(parts))
+        parts[i] = parts[i] + ", " + random.choice(FILLERS)
+        return ",".join(parts)
+    return text + " " + random.choice(FILLERS)
+
+def _add_typos(text: str, p_typo: float = 0.06) -> str:
+    chars = list(text)
+    for i in range(1, len(chars) - 2):
+        if random.random() < p_typo and chars[i].isalpha() and chars[i+1].isalpha():
+            chars[i], chars[i+1] = chars[i+1], chars[i]  # swap di due lettere adiacenti
+    return "".join(chars)
+
+def _make_mixed_sentiment(body: str, dept: str, sentiment: str, templates: dict, p_mixed: float = 0.40) -> str:
+    """
+    Aggiunge una frase di polarità opposta mantenendo l'etichetta originaria.
+    Realistico: recensioni con pro + contro.
+    """
+    if random.random() > p_mixed:
+        return body
+
+    dept_templates = templates[dept]
+    if sentiment == "pos":
+        opposite = random.choice(dept_templates["neg_bodies"])
+        tail = " Però " + opposite
+    else:
+        opposite = random.choice(dept_templates["pos_bodies"])
+        tail = " Detto questo, " + opposite
+
+    return body + tail
+
+def _make_ambiguous_dept(body: str, dept: str, p_ambiguous: float = 0.60) -> str:
+    if random.random() > p_ambiguous:
+        return body
+
+    other_depts = [d for d in DEPT_KEYWORDS.keys() if d != dept]
+    other = random.choice(other_depts)
+
+    # 2 keyword intrusive invece di 1
+    kws = random.sample(DEPT_KEYWORDS[other], k=2)
+    return body + f" (Nota: anche {kws[0]} e {kws[1]} non erano il massimo.)"
 
 
 # =========================
-# 1. GENERAZIONE DATASET
+# 1. GENERATORE DATASET SINTETICO
 # =========================
-
 def generate_synthetic_reviews(n_samples: int = 500, random_state: int = 42) -> pd.DataFrame:
 
 
@@ -191,79 +261,78 @@ def generate_synthetic_reviews(n_samples: int = 500, random_state: int = 42) -> 
                 "Deluso dalla pulizia",
             ],
             "neg_bodies": [
-                "Ho trovato polvere sui mobili e capelli nel bagno.",
-                "La camera non è stata rifatta un giorno su due, davvero inaccettabile.",
-                "Macchie sulle lenzuola e asciugamani non cambiati.",
-                "Pulizia molto approssimativa, pavimento appiccicoso e cestino non svuotato.",
+                "Ho trovato polvere sui mobili e capelli nel bagno, pessima pulizia.",
+                "Stanza non pulita bene, asciugamani macchiati e pavimento sporco.",
+                "Il bagno aveva cattivo odore e c'erano residui, servizio housekeeping da migliorare.",
+                "Molta polvere sotto il letto e lenzuola non fresche, esperienza negativa.",
             ],
         },
         "Reception": {
             "pos_titles": [
-                "Accoglienza perfetta",
-                "Staff gentilissimo",
                 "Check-in veloce",
-                "Reception cordiale",
+                "Reception disponibile",
+                "Ottima accoglienza",
+                "Staff professionale",
             ],
             "pos_bodies": [
-                "Personale della reception molto disponibile e sorridente.",
-                "Check-in rapido e senza problemi, ci hanno dato anche ottimi consigli sulla città.",
-                "Ottima gestione del check-out, conto chiaro e nessun intoppo.",
-                "Reception aperta 24 ore su 24, sempre pronti ad aiutare.",
+                "Check-in rapido e personale gentile, spiegazioni chiare e ottima accoglienza.",
+                "Reception molto disponibile, ci hanno aiutato con indicazioni e orari senza problemi.",
+                "Pagamento e check out velocissimi, staff cordiale e professionale.",
+                "Ottimo servizio in reception, sempre pronti a rispondere alle nostre richieste.",
             ],
             "neg_titles": [
-                "Check-in lunghissimo",
-                "Reception poco disponibile",
-                "Problemi con il pagamento",
-                "Esperienza negativa al desk",
+                "Check-in lento",
+                "Reception scortese",
+                "Problemi al pagamento",
+                "Pessima accoglienza",
             ],
             "neg_bodies": [
-                "Ho dovuto aspettare più di mezz'ora per il check-in.",
-                "Personale poco cordiale, nessun sorriso e poca attenzione alle richieste.",
-                "Hanno sbagliato a registrare il pagamento e ho dovuto discutere per sistemare.",
-                "Informazioni confuse su tasse di soggiorno e orari, poca professionalità.",
+                "Check-in lunghissimo, fila alla reception e poca organizzazione.",
+                "Personale poco gentile, problemi nel gestire il pagamento e il saldo finale.",
+                "Check out lento e confuso, hanno sbagliato a registrare la prenotazione.",
+                "Accoglienza fredda e poca disponibilità, esperienza negativa con la reception.",
             ],
         },
         "F&B": {
             "pos_titles": [
-                "Colazione fantastica",
+                "Colazione ottima",
                 "Ristorante eccellente",
-                "Ottimo buffet",
+                "Buffet ricco",
                 "Cibo delizioso",
             ],
             "pos_bodies": [
-                "Colazione abbondante con molta scelta di dolce e salato.",
-                "Ristorante dell'hotel davvero buono, piatti curati e servizio puntuale.",
-                "Buffet serale molto vario, qualità del cibo sopra la media.",
-                "Camerieri gentili e servizio veloce, cibo di ottima qualità.",
+                "Colazione varia e di qualità, ottimo caffè e prodotti freschi.",
+                "Ristorante interno davvero buono, piatti gustosi e servizio veloce.",
+                "Buffet ricco, croissant caldi e frutta fresca, molto soddisfatto.",
+                "Cena ottima, ingredienti di qualità e personale gentile al ristorante.",
             ],
             "neg_titles": [
                 "Colazione scarsa",
                 "Ristorante deludente",
-                "Cibo freddo",
-                "Esperienza pessima al buffet",
+                "Buffet povero",
+                "Cibo pessimo",
             ],
             "neg_bodies": [
-                "Poca scelta a colazione, molti prodotti confezionati.",
-                "Il ristorante era caro e la qualità dei piatti non all'altezza.",
-                "Cibo servito tiepido e poco saporito.",
-                "Buffet quasi vuoto e piatti non riforniti, molto deludente.",
+                "Colazione povera e prodotti non freschi, poca scelta e caffè pessimo.",
+                "Ristorante caro e qualità bassa, piatti freddi e servizio lento.",
+                "Buffet quasi vuoto, poche opzioni e rifornimento lento, deludente.",
+                "Cena pessima, ingredienti scadenti e personale poco attento al ristorante.",
             ],
         },
     }
 
     ambiguous_bodies = [
-        "Camera pulita ma colazione deludente, non so se tornerei.",
-        "Check-in veloce ma la stanza aveva qualche problema.",
-        "Personale gentile alla reception, però il ristorante non mi ha convinto.",
-        "Colazione buona ma il bagno non era perfetto.",
+        "La posizione era buona ma ci sono stati piccoli problemi durante il soggiorno.",
+        "Nel complesso bene, ma alcuni dettagli potrebbero essere migliorati.",
+        "Esperienza discreta, nulla di eccezionale.",
+        "Struttura carina, ma ci sono aspetti da curare.",
     ]
 
     rows = []
-
     for i in range(1, n_samples + 1):
         dept = random.choice(departments)
         sentiment = random.choice(sentiments)
-
+        
         dept_templates = templates[dept]
 
         if sentiment == "pos":
@@ -274,17 +343,29 @@ def generate_synthetic_reviews(n_samples: int = 500, random_state: int = 42) -> 
             body = random.choice(dept_templates["neg_bodies"])
 
         extra = ""
-        if random.random() < 0.15:
+        if random.random() < 0.40:  # 40% di recensioni con ambiguità
             extra = " " + random.choice(ambiguous_bodies)
 
         full_body = body + extra
+
+        # ===== Realismo controllato: mixed, ambiguità, sinonimi, rumore, typo =====
+        # (Aumenta/diminuisci le probabilità per regolare la difficoltà e ottenere F1 ~ 0.82–0.90)
+        full_body = _make_mixed_sentiment(full_body, dept, sentiment, templates, p_mixed=0.40)
+        full_body = _make_ambiguous_dept(full_body, dept, p_ambiguous=0.60)
+        full_body = _apply_synonyms(full_body, p_syn=0.35)
+        full_body = _inject_fillers(full_body, p_filler=0.30)
+        full_body = _add_typos(full_body, p_typo=0.07)
+        
+        dept_label = dept
+        if random.random() < 0.06:  # prova 0.05–0.10
+            dept_label = random.choice([d for d in departments if d != dept])
 
         rows.append(
             {
                 "id": i,
                 "title": title,
                 "body": full_body,
-                "department": dept,
+                "department": dept_label,   # <-- QUI cambia
                 "sentiment": sentiment,
             }
         )
@@ -297,334 +378,184 @@ def generate_synthetic_reviews(n_samples: int = 500, random_state: int = 42) -> 
 # =========================
 # 2. PIPELINE ML
 # =========================
+def train_models(df: pd.DataFrame, out_dir: str, seed: int = 42):
+    os.makedirs(out_dir, exist_ok=True)
 
-def train_models(df: pd.DataFrame):
-    """
-    Addestra i modelli per:
-    - department (multiclasse)
-    - sentiment (binario)
-    Restituisce: vectorizer, dept_model, sent_model, metrics_dict
-    Produce anche: risultati salvati in /results (tabelle + grafici + split + modelli)
-    """
-    os.makedirs("results", exist_ok=True)
-    save_environment_info("results")
-
-    # Testo unificato + preprocess
     df = df.copy()
-    df["title"] = df.get("title", "").fillna("")
-    df["body"] = df.get("body", "").fillna("")
-    df["text"] = (df["title"] + " " + df["body"]).apply(simple_preprocess)
+    df["text"] = (df["title"].fillna("") + " " + df["body"].fillna("")).apply(simple_preprocess)
 
-    # Target
-    X_text = df["text"].values
-    y_dept = df["department"].values
-    y_sent = df["sentiment"].values
+    # split 80/20 (riproducibile)
+    train_df, test_df = train_test_split(df, test_size=0.2, random_state=seed, stratify=df["department"])
 
-    # Stratificazione combinata (department + sentiment) per split più stabile
-    # Se alcune combinazioni hanno pochissimi esempi, potrebbe fallire: in quel caso si ripiega su department.
-    stratify_key = (df["department"].astype(str) + "_" + df["sentiment"].astype(str)).values
-    try:
-        X_train, X_test, y_dept_train, y_dept_test, y_sent_train, y_sent_test = train_test_split(
-            X_text, y_dept, y_sent,
-            test_size=0.2,
-            random_state=SEED,
-            stratify=stratify_key
-        )
-        used_stratify = "department+sentiment"
-    except ValueError:
-        X_train, X_test, y_dept_train, y_dept_test, y_sent_train, y_sent_test = train_test_split(
-            X_text, y_dept, y_sent,
-            test_size=0.2,
-            random_state=SEED,
-            stratify=y_dept
-        )
-        used_stratify = "department"
+    # salva split per riproducibilità
+    train_df.to_csv(os.path.join(out_dir, "train_split.csv"), index=False)
+    test_df.to_csv(os.path.join(out_dir, "test_split.csv"), index=False)
 
-    # Salva split per riproducibilità
-    pd.DataFrame({
-        "text": X_train,
-        "department": y_dept_train,
-        "sentiment": y_sent_train
-    }).to_csv("results/train_split.csv", index=False, encoding="utf-8")
+    split_meta = {
+        "seed": seed,
+        "test_size": 0.2,
+        "stratify": "department",
+        "n_train": int(len(train_df)),
+        "n_test": int(len(test_df)),
+    }
+    with open(os.path.join(out_dir, "split_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(split_meta, f, indent=2, ensure_ascii=False)
 
-    pd.DataFrame({
-        "text": X_test,
-        "department": y_dept_test,
-        "sentiment": y_sent_test
-    }).to_csv("results/test_split.csv", index=False, encoding="utf-8")
+    # vectorizer
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=2, max_df=0.95)
+    X_train = vectorizer.fit_transform(train_df["text"])
+    X_test = vectorizer.transform(test_df["text"])
 
-    with open("results/split_info.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {"test_size": 0.2, "random_state": SEED, "stratify": used_stratify},
-            f, indent=2, ensure_ascii=False
-        )
+    # -----------------------------
+    # 2A) Department classifier
+    # -----------------------------
+    y_train_dept = train_df["department"]
+    y_test_dept = test_df["department"]
 
-    # Vectorizer
-    vectorizer = TfidfVectorizer(
-        max_features=3000,
-        ngram_range=(1, 2),
-    )
-    X_train_vec = vectorizer.fit_transform(X_train)
-    X_test_vec = vectorizer.transform(X_test)
+    dept_clf = LogisticRegression(max_iter=2000, random_state=seed)
+    dept_clf.fit(X_train, y_train_dept)
 
-    # Modelli (con random_state)
-    dept_clf = LogisticRegression(max_iter=300, multi_class="auto", random_state=SEED)
-    dept_clf.fit(X_train_vec, y_dept_train)
+    y_pred_dept = dept_clf.predict(X_test)
 
-    sent_clf = LogisticRegression(max_iter=300, random_state=SEED)
-    sent_clf.fit(X_train_vec, y_sent_train)
+    dept_acc = accuracy_score(y_test_dept, y_pred_dept)
+    dept_f1_macro = f1_score(y_test_dept, y_pred_dept, average="macro")
 
-    # =========================
-    # Valutazione: DEPARTMENT
-    # =========================
-    y_dept_pred = dept_clf.predict(X_test_vec)
-    dept_acc = accuracy_score(y_dept_test, y_dept_pred)
-    dept_f1_macro = f1_score(y_dept_test, y_dept_pred, average="macro")
+    # report per classe
+    dept_report = classification_report(y_test_dept, y_pred_dept, output_dict=True)
+    pd.DataFrame(dept_report).transpose().to_csv(os.path.join(out_dir, "dept_classification_report.csv"))
 
-    dept_report_text = classification_report(y_dept_test, y_dept_pred)
-    dept_report_dict = classification_report(y_dept_test, y_dept_pred, output_dict=True)
-    pd.DataFrame(dept_report_dict).transpose().to_csv("results/report_department.csv", encoding="utf-8")
-
-    # Grafico F1 per classe - Department
-    rep_df = pd.DataFrame(dept_report_dict).transpose()
-
-    exclude = {"accuracy", "macro avg", "weighted avg"}
-    class_rows = [idx for idx in rep_df.index if idx not in exclude]
-    f1_values = rep_df.loc[class_rows, "f1-score"].astype(float)
-
-    plt.figure(figsize=(7, 4))
-    plt.bar(f1_values.index.astype(str), f1_values.values)
-    plt.ylim(0, 1.0)
-    plt.title("F1 per class - Department")
-    plt.ylabel("F1 score")
-    plt.xticks(rotation=0)
-    plt.savefig("results/f1_barre_department.png", bbox_inches="tight")
-    plt.close()
-
-    dept_classes = np.unique(y_dept)
-    cm_dept = confusion_matrix(y_dept_test, y_dept_pred, labels=dept_classes)
+    # confusion matrix
+    dept_labels = sorted(df["department"].unique().tolist())
+    cm_dept = confusion_matrix(y_test_dept, y_pred_dept, labels=dept_labels)
     plot_confusion_matrix(
         cm_dept,
-        class_names=dept_classes,
-        title="Confusion Matrix - Reparto",
-        filename=os.path.join("results", "confusion_matrix_department.png"),
-    )
-    pd.DataFrame(cm_dept, index=dept_classes, columns=dept_classes).to_csv(
-        "results/confusion_matrix_department.csv", encoding="utf-8"
+        labels=dept_labels,
+        title="Confusion Matrix - Department",
+        out_path_png=os.path.join(out_dir, "dept_confusion_matrix.png"),
+        out_path_csv=os.path.join(out_dir, "dept_confusion_matrix.csv"),
     )
 
-    # =========================
-    # Valutazione: SENTIMENT
-    # =========================
-    y_sent_pred = sent_clf.predict(X_test_vec)
-    sent_acc = accuracy_score(y_sent_test, y_sent_pred)
-    sent_f1_macro = f1_score(y_sent_test, y_sent_pred, average="macro")
-
-    sent_report_text = classification_report(y_sent_test, y_sent_pred)
-    sent_report_dict = classification_report(y_sent_test, y_sent_pred, output_dict=True)
-    pd.DataFrame(sent_report_dict).transpose().to_csv("results/report_sentiment.csv", encoding="utf-8")
-
-    # Grafico F1 per classe - Sentiment
-    rep_df_sent = pd.DataFrame(sent_report_dict).transpose()
-
-    exclude = {"accuracy", "macro avg", "weighted avg"}
-    class_rows = [idx for idx in rep_df_sent.index if idx not in exclude]
-    f1_values_sent = rep_df_sent.loc[class_rows, "f1-score"].astype(float)
-
-    plt.figure(figsize=(7, 4))
-    plt.bar(f1_values_sent.index.astype(str), f1_values_sent.values)
-    plt.ylim(0, 1.0)
-    plt.title("F1 per class - Sentiment")
-    plt.ylabel("F1 score")
-    plt.xticks(rotation=0)
-    plt.savefig("results/f1_barre_sentiment.png", bbox_inches="tight")
+    # bar chart F1 per classe dept
+    dept_f1_per_class = {k: v["f1-score"] for k, v in dept_report.items() if k in dept_labels}
+    plt.figure()
+    plt.bar(list(dept_f1_per_class.keys()), list(dept_f1_per_class.values()))
+    plt.title("F1-score per classe - Department")
+    plt.xlabel("Classe")
+    plt.ylabel("F1")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "dept_f1_per_class.png"), dpi=200, bbox_inches="tight")
     plt.close()
 
-    sent_classes = np.unique(y_sent)
-    cm_sent = confusion_matrix(y_sent_test, y_sent_pred, labels=sent_classes)
+    # -----------------------------
+    # 2B) Sentiment classifier
+    # -----------------------------
+    y_train_sent = train_df["sentiment"]
+    y_test_sent = test_df["sentiment"]
+
+    sent_clf = LogisticRegression(max_iter=2000, random_state=seed)
+    sent_clf.fit(X_train, y_train_sent)
+
+    y_pred_sent = sent_clf.predict(X_test)
+
+    sent_acc = accuracy_score(y_test_sent, y_pred_sent)
+    sent_f1_macro = f1_score(y_test_sent, y_pred_sent, average="macro")
+
+    sent_report = classification_report(y_test_sent, y_pred_sent, output_dict=True)
+    pd.DataFrame(sent_report).transpose().to_csv(os.path.join(out_dir, "sent_classification_report.csv"))
+
+    sent_labels = sorted(df["sentiment"].unique().tolist())
+    cm_sent = confusion_matrix(y_test_sent, y_pred_sent, labels=sent_labels)
     plot_confusion_matrix(
         cm_sent,
-        class_names=sent_classes,
+        labels=sent_labels,
         title="Confusion Matrix - Sentiment",
-        filename=os.path.join("results", "confusion_matrix_sentiment.png"),
+        out_path_png=os.path.join(out_dir, "sent_confusion_matrix.png"),
+        out_path_csv=os.path.join(out_dir, "sent_confusion_matrix.csv"),
     )
-    pd.DataFrame(cm_sent, index=sent_classes, columns=sent_classes).to_csv(
-        "results/confusion_matrix_sentiment.csv", encoding="utf-8"
-    )
-    
-    # Curve ROC / PR se binario e predict_proba disponibile
-    curve_metrics = {}
-    if hasattr(sent_clf, "predict_proba") and len(sent_clf.classes_) == 2:
-        pos_label = _get_binary_positive_label(sent_clf.classes_)
-        y_proba_pos = sent_clf.predict_proba(X_test_vec)[:, list(sent_clf.classes_).index(pos_label)]
-        curve_metrics = plot_sentiment_curves(y_sent_test, y_proba_pos, pos_label=pos_label, out_dir="results")
 
-    # Salva modelli e vectorizer
-    joblib.dump(vectorizer, "results/tfidf_vectorizer.joblib")
-    joblib.dump(dept_clf, "results/dept_model.joblib")
-    joblib.dump(sent_clf, "results/sent_model.joblib")
+    # curve ROC/PR (solo se binario e con proba)
+    pos_label = _get_binary_positive_label(df["sentiment"])
+    if len(sent_labels) == 2 and hasattr(sent_clf, "predict_proba"):
+        y_true_bin = (y_test_sent == pos_label).astype(int).values
+        y_prob = sent_clf.predict_proba(X_test)[:, sent_labels.index(pos_label)]
+        plot_sentiment_curves(y_true_bin, y_prob, out_dir=out_dir)
 
-    # Salva metriche riassuntive
+    # salva metriche riassuntive
     metrics = {
-        "dept_acc": float(dept_acc),
-        "dept_f1_macro": float(dept_f1_macro),
-        "sent_acc": float(sent_acc),
-        "sent_f1_macro": float(sent_f1_macro),
-        **curve_metrics,
+        "department_accuracy": float(dept_acc),
+        "department_f1_macro": float(dept_f1_macro),
+        "sentiment_accuracy": float(sent_acc),
+        "sentiment_f1_macro": float(sent_f1_macro),
     }
-    pd.DataFrame([metrics]).to_csv("results/metrics_summary.csv", index=False, encoding="utf-8")
-
-    # Stampa a console (comodo durante lo sviluppo)
-    print("\n=== RISULTATI REPARTO ===")
-    print(f"Accuracy reparto: {dept_acc:.3f}")
-    print(f"F1 macro reparto: {dept_f1_macro:.3f}")
-    print(dept_report_text)
-
-    print("\n=== RISULTATI SENTIMENT ===")
-    print(f"Accuracy sentiment: {sent_acc:.3f}")
-    print(f"F1 macro sentiment: {sent_f1_macro:.3f}")
-    print(sent_report_text)
-
-    # Esempi di errori (max 5)
-    print("\n=== ESEMPI DI ERRORI (max 5) ===")
-    X_test_list = list(X_test)
-    count_errors = 0
-    for i, text in enumerate(X_test_list):
-        wrong_dept = y_dept_test[i] != y_dept_pred[i]
-        wrong_sent = y_sent_test[i] != y_sent_pred[i]
-        if wrong_dept or wrong_sent:
-            print("-" * 80)
-            print(f"Testo: {text}")
-            print(f"Reparto vero: {y_dept_test[i]} | Reparto predetto: {y_dept_pred[i]}")
-            print(f"Sentiment vero: {y_sent_test[i]} | Sentiment predetto: {y_sent_pred[i]}")
-            count_errors += 1
-        if count_errors >= 5:
-            break
+    with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
 
     return vectorizer, dept_clf, sent_clf, metrics
 
 
 # =========================
-# 3. DASHBOARD TKINTER
+# 3. DASHBOARD (Tkinter)
 # =========================
-
-class ReviewDashboard(tk.Tk):
-    def __init__(self, vectorizer, dept_model, sent_model, metrics):
-        super().__init__()
-
-        self.title("Hotel Reviews Routing & Sentiment - Project Work")
-        self.geometry("950x700")
-
+class HotelReviewApp:
+    def __init__(self, root, vectorizer, dept_model, sent_model):
+        self.root = root
         self.vectorizer = vectorizer
         self.dept_model = dept_model
         self.sent_model = sent_model
-        self.metrics = metrics
 
+        self.root.title("Hotel Review Routing + Sentiment (ML)")
         self._build_ui()
 
     def _build_ui(self):
-        # Sezione metriche
-        frame_metrics = tk.LabelFrame(self, text="Metriche modello (test set 20%)")
-        frame_metrics.pack(fill="x", padx=10, pady=10)
+        frm = ttk.Frame(self.root, padding=10)
+        frm.grid(row=0, column=0, sticky="nsew")
 
-        extra = ""
-        if "roc_auc" in self.metrics:
-            extra += f" | ROC AUC sentiment: {self.metrics['roc_auc']:.3f}"
-        if "average_precision" in self.metrics:
-            extra += f" | AP sentiment: {self.metrics['average_precision']:.3f}"
+        ttk.Label(frm, text="Titolo:").grid(row=0, column=0, sticky="w")
+        self.title_entry = ttk.Entry(frm, width=80)
+        self.title_entry.grid(row=0, column=1, sticky="we", padx=5)
 
-        lbl_metrics = tk.Label(
-            frame_metrics,
-            text=(
-                f"Reparto -> Accuracy: {self.metrics['dept_acc']:.3f} | "
-                f"F1 macro: {self.metrics['dept_f1_macro']:.3f}    |    "
-                f"Sentiment -> Accuracy: {self.metrics['sent_acc']:.3f} | "
-                f"F1 macro: {self.metrics['sent_f1_macro']:.3f}"
-                f"{extra}"
-            ),
-        )
-        lbl_metrics.pack(anchor="w", padx=10, pady=5)
+        ttk.Label(frm, text="Testo recensione:").grid(row=1, column=0, sticky="nw")
+        self.body_text = tk.Text(frm, width=80, height=10)
+        self.body_text.grid(row=1, column=1, sticky="we", padx=5, pady=5)
 
-        # Titolo recensione
-        lbl_title = tk.Label(self, text="Titolo recensione:")
-        lbl_title.pack(anchor="w", padx=10, pady=(10, 0))
+        btn_frame = ttk.Frame(frm)
+        btn_frame.grid(row=2, column=1, sticky="w")
 
-        self.entry_title = tk.Entry(self, width=120)
-        self.entry_title.pack(anchor="w", padx=10, pady=5)
+        ttk.Button(btn_frame, text="Predici (singola)", command=self.predict_single).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="Predici da CSV (batch)", command=self.predict_from_csv).grid(row=0, column=1, padx=5)
 
-        # Testo recensione
-        lbl_body = tk.Label(self, text="Testo recensione:")
-        lbl_body.pack(anchor="w", padx=10, pady=(10, 0))
+        self.result_label = ttk.Label(frm, text="Risultati: -", font=("Arial", 11, "bold"))
+        self.result_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=10)
 
-        self.text_body = tk.Text(self, width=120, height=10)
-        self.text_body.pack(anchor="w", padx=10, pady=5)
-
-        # Bottoni
-        frame_buttons = tk.Frame(self)
-        frame_buttons.pack(anchor="w", padx=10, pady=10)
-
-        btn_predict = tk.Button(frame_buttons, text="Predici singola recensione", command=self.predict_single)
-        btn_predict.grid(row=0, column=0, padx=5)
-
-        btn_batch = tk.Button(frame_buttons, text="Predici da CSV", command=self.predict_from_csv)
-        btn_batch.grid(row=0, column=1, padx=5)
-
-        # Output
-        lbl_output = tk.Label(self, text="Output:")
-        lbl_output.pack(anchor="w", padx=10, pady=(10, 0))
-
-        self.text_output = tk.Text(self, width=120, height=14, state="disabled")
-        self.text_output.pack(anchor="w", padx=10, pady=5)
+        frm.columnconfigure(1, weight=1)
 
     def predict_single(self):
-        title = self.entry_title.get().strip()
-        body = self.text_body.get("1.0", tk.END).strip()
+        title = self.title_entry.get().strip()
+        body = self.body_text.get("1.0", tk.END).strip()
+        text = simple_preprocess(f"{title} {body}")
 
-        if not title and not body:
-            messagebox.showwarning("Attenzione", "Inserisci almeno il titolo o il testo della recensione.")
-            return
+        X = self.vectorizer.transform([text])
+        dept_pred = self.dept_model.predict(X)[0]
 
-        combined = simple_preprocess(title + " " + body)
-        X_vec = self.vectorizer.transform([combined])
+        sent_pred = self.sent_model.predict(X)[0]
+        sent_prob = None
+        if hasattr(self.sent_model, "predict_proba"):
+            probs = self.sent_model.predict_proba(X)[0]
+            classes = list(self.sent_model.classes_)
+            # probability of predicted class
+            sent_prob = probs[classes.index(sent_pred)]
 
-        # Reparto
-        dept_probs = self.dept_model.predict_proba(X_vec)[0]
-        dept_classes = self.dept_model.classes_
-        dept_idx = int(dept_probs.argmax())
-        dept_pred = dept_classes[dept_idx]
-        dept_prob = float(dept_probs[dept_idx])
-
-        # Sentiment
-        sent_probs = self.sent_model.predict_proba(X_vec)[0]
-        sent_classes = self.sent_model.classes_
-        sent_idx = int(sent_probs.argmax())
-        sent_pred = sent_classes[sent_idx]
-        sent_prob = float(sent_probs[sent_idx])
-
-        sent_label_it = "Positivo" if str(sent_pred) == "pos" else "Negativo"
-
-        lines = []
-        lines.append(f"Reparto consigliato: {dept_pred} (probabilità {dept_prob:.2%})")
-        lines.append(f"Sentiment stimato: {sent_label_it} [{sent_pred}] (probabilità {sent_prob:.2%})")
-        lines.append("")
-        lines.append("Probabilità reparto:")
-        for cls, p in zip(dept_classes, dept_probs):
-            lines.append(f" - {cls}: {float(p):.2%}")
-        lines.append("")
-        lines.append("Probabilità sentiment:")
-        for cls, p in zip(sent_classes, sent_probs):
-            label_it = "Positivo" if str(cls) == "pos" else "Negativo"
-            lines.append(f" - {label_it} [{cls}]: {float(p):.2%}")
-
-        self.text_output.config(state="normal")
-        self.text_output.delete("1.0", tk.END)
-        self.text_output.insert(tk.END, "\n".join(lines))
-        self.text_output.config(state="disabled")
+        if sent_prob is not None:
+            self.result_label.config(
+                text=f"Risultati: Reparto = {dept_pred} | Sentiment = {sent_pred} (p={sent_prob:.2f})"
+            )
+        else:
+            self.result_label.config(text=f"Risultati: Reparto = {dept_pred} | Sentiment = {sent_pred}")
 
     def predict_from_csv(self):
         file_path = filedialog.askopenfilename(
-            title="Seleziona CSV di recensioni",
-            filetypes=[("File CSV", "*.csv")],
+            title="Seleziona CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if not file_path:
             return
@@ -632,75 +563,60 @@ class ReviewDashboard(tk.Tk):
         try:
             df = pd.read_csv(file_path)
         except Exception as e:
-            messagebox.showerror("Errore", f"Impossibile leggere il file CSV: {e}")
+            messagebox.showerror("Errore", f"Impossibile leggere il CSV: {e}")
             return
 
-        required_cols = {"title", "body"}
-        if not required_cols.issubset(set(df.columns)):
-            messagebox.showerror(
-                "Errore",
-                f"Il CSV deve contenere almeno le colonne: {required_cols}",
-            )
+        if not {"title", "body"}.issubset(df.columns):
+            messagebox.showerror("Errore", "Il CSV deve contenere almeno le colonne: title, body")
             return
 
         df = df.copy()
         df["text"] = (df["title"].fillna("") + " " + df["body"].fillna("")).apply(simple_preprocess)
-        X_vec = self.vectorizer.transform(df["text"].values)
 
-        # Reparto
-        dept_probs = self.dept_model.predict_proba(X_vec)
-        dept_classes = self.dept_model.classes_
-        dept_pred_idx = dept_probs.argmax(axis=1)
-        dept_pred = dept_classes[dept_pred_idx]
-        dept_pred_prob = dept_probs.max(axis=1)
+        X = self.vectorizer.transform(df["text"].tolist())
+        df["pred_department"] = self.dept_model.predict(X)
+        df["pred_sentiment"] = self.sent_model.predict(X)
 
-        # Sentiment
-        sent_probs = self.sent_model.predict_proba(X_vec)
-        sent_classes = self.sent_model.classes_
-        sent_pred_idx = sent_probs.argmax(axis=1)
-        sent_pred = sent_classes[sent_pred_idx]
-        sent_pred_prob = sent_probs.max(axis=1)
+        if hasattr(self.sent_model, "predict_proba"):
+            probs = self.sent_model.predict_proba(X)
+            classes = list(self.sent_model.classes_)
+            idx_pos = 0
+            # pick probability of predicted class
+            pred_idx = [classes.index(s) for s in df["pred_sentiment"].tolist()]
+            df["pred_sentiment_prob"] = [float(probs[i, pred_idx[i]]) for i in range(len(pred_idx))]
 
-        df["pred_department"] = dept_pred
-        df["pred_department_prob"] = dept_pred_prob
-        df["pred_sentiment"] = sent_pred
-        df["pred_sentiment_prob"] = sent_pred_prob
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = os.path.join(RESULTS_DIR, f"batch_predictions_{ts}.csv")
+        df.to_csv(out_path, index=False)
 
-        base, ext = os.path.splitext(file_path)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = f"{base}_predictions_{timestamp}.csv"
-        df.to_csv(out_path, index=False, encoding="utf-8")
-
-        messagebox.showinfo(
-            "Completato",
-            f"Predizioni salvate in:\n{out_path}",
-        )
+        messagebox.showinfo("Completato", f"Predizioni salvate in:\n{out_path}")
 
 
 # =========================
-# 4. MAIN
+# MAIN
 # =========================
-
 def main():
+    random.seed(SEED)
+    np.random.seed(SEED)
 
-    datset_path = Path("reviews_Hotel.csv")
-    
-    if not os.path.exists(datset_path):
-        # Genera dataset sintetico
-        print("[INFO] Generazione dataset in corso...")
-        df_generated = generate_synthetic_reviews(n_samples=500, random_state=SEED)
-        df_generated.to_csv(datset_path, index=False, encoding="utf-8")
-        print("[INFO] Dataset generato e salvato in:", datset_path)
+    save_environment_info(RESULTS_DIR, SEED)
 
-    # dataset Fisso
-    df = pd.read_csv(datset_path)
+    dataset_path = "reviews_synthetic_V2.csv"
+    if not os.path.exists(dataset_path):
+        df = generate_synthetic_reviews(n_samples=500, random_state=SEED)
+        df.to_csv(dataset_path, index=False)
 
-    # Addestra modelli + salva risultati in /results
-    vectorizer, dept_model, sent_model, metrics = train_models(df)
+    df = pd.read_csv(dataset_path)
 
-    # Avvia dashboard Tkinter
-    app = ReviewDashboard(vectorizer, dept_model, sent_model, metrics)
-    app.mainloop()
+    vectorizer, dept_model, sent_model, metrics = train_models(df, out_dir=RESULTS_DIR, seed=SEED)
+
+    print("=== METRICHE ===")
+    for k, v in metrics.items():
+        print(f"{k}: {v:.4f}")
+
+    root = tk.Tk()
+    app = HotelReviewApp(root, vectorizer, dept_model, sent_model)
+    root.mainloop()
 
 
 if __name__ == "__main__":
