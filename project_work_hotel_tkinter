@@ -128,6 +128,8 @@ def plot_sentiment_curves(y_true, y_prob, out_dir: str):
     plt.close()
 
 
+
+
 # =========================
 # 1B. "REALISMO" NEL DATASET SINTETICO (AMBIGUITÀ / MIXED / SINONIMI / RUMORE / TYPO)
 # =========================
@@ -226,6 +228,88 @@ def _make_ambiguous_dept(body: str, dept: str, p_ambiguous: float = 0.60) -> str
     # 2 keyword intrusive invece di 1
     kws = random.sample(DEPT_KEYWORDS[other], k=2)
     return body + f" (Nota: anche {kws[0]} e {kws[1]} non erano il massimo.)"
+
+def ambiguity_score(text: str) -> dict:
+    """
+    Heuristica semplice:
+    - ambiguity_dept: testo contiene keyword di >=2 reparti diversi
+    - mixed_sentiment: contiene indicatori tipo "però", "tuttavia", "detto questo", ecc.
+    Ritorna info utile per filtrare e commentare.
+    """
+    t = simple_preprocess(text)
+
+    dept_hits = {}
+    for dept, kws in DEPT_KEYWORDS.items():
+        hits = 0
+        for kw in kws:
+            kw_norm = simple_preprocess(kw)
+            if kw_norm in t:
+                hits += 1
+        dept_hits[dept] = hits
+
+    active_depts = [d for d, h in dept_hits.items() if h > 0]
+    ambiguous_dept = len(active_depts) >= 2
+
+    mixed_markers = ["pero", "però", "tuttavia", "detto questo", "comunque", "nonostante", "anche se"]
+    mixed_sentiment = any(m in t for m in mixed_markers)
+
+    return {
+        "dept_hits": dept_hits,
+        "active_depts": active_depts,
+        "ambiguous_dept": ambiguous_dept,
+        "mixed_sentiment": mixed_sentiment,
+        "is_ambiguous": ambiguous_dept or mixed_sentiment,
+    }
+
+
+def print_ambiguous_errors(test_df: pd.DataFrame,
+                           y_true_dept, y_pred_dept,
+                           y_true_sent, y_pred_sent,
+                           max_examples: int = 5,
+                           out_csv_path: str | None = None):
+    """
+    Stampa e (opzionale) salva esempi di errori *ambigui*:
+    - errore dept o sent
+    - e testo con ambiguità (multi-reparto e/o sentiment mixed)
+    """
+    rows_out = []
+    printed = 0
+
+    for i, row in enumerate(test_df.itertuples(index=False)):
+        text_raw = f"{getattr(row, 'title', '')} {getattr(row, 'body', '')}"
+        amb = ambiguity_score(text_raw)
+
+        wrong_dept = (y_true_dept[i] != y_pred_dept[i])
+        wrong_sent = (y_true_sent[i] != y_pred_sent[i])
+
+        if (wrong_dept or wrong_sent) and amb["is_ambiguous"]:
+            print("-" * 80)
+            print(f"Testo: {text_raw}")
+            print(f"Reparto vero: {y_true_dept[i]} | Reparto predetto: {y_pred_dept[i]}")
+            print(f"Sentiment vero: {y_true_sent[i]} | Sentiment predetto: {y_pred_sent[i]}")
+            print(f"Ambiguità: active_depts={amb['active_depts']} | dept_hits={amb['dept_hits']} | mixed={amb['mixed_sentiment']}")
+            printed += 1
+
+            rows_out.append({
+                "title": getattr(row, "title", ""),
+                "body": getattr(row, "body", ""),
+                "true_department": y_true_dept[i],
+                "pred_department": y_pred_dept[i],
+                "true_sentiment": y_true_sent[i],
+                "pred_sentiment": y_pred_sent[i],
+                "active_depts": ",".join(amb["active_depts"]),
+                "mixed_sentiment": amb["mixed_sentiment"],
+                "dept_hits": amb["dept_hits"],
+            })
+
+            if printed >= max_examples:
+                break
+
+    if printed == 0:
+        print("\n(Nessun errore ambiguo trovato con l’euristica attuale.)")
+
+    if out_csv_path and rows_out:
+        pd.DataFrame(rows_out).to_csv(out_csv_path, index=False)
 
 
 # =========================
@@ -456,7 +540,32 @@ def train_models(df: pd.DataFrame, out_dir: str, seed: int = 42):
     sent_clf.fit(X_train, y_train_sent)
 
     y_pred_sent = sent_clf.predict(X_test)
+    
+    # =========================
+    # 2C) Esempi di errori tipici (commenti ambigui) - max 5
+    # =========================
+    print("\n=== ESEMPI DI ERRORI AMBIGUI (max 5) ===")
 
+    # reset indici così y_test e test_df sono allineati con y_pred_*
+    test_df_reset = test_df.reset_index(drop=True)
+    y_true_dept = y_test_dept.reset_index(drop=True).values
+    y_true_sent = y_test_sent.reset_index(drop=True).values
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    amb_errors_csv = os.path.join(out_dir, f"ambiguous_errors_{ts}.csv")
+
+    print_ambiguous_errors(
+        test_df=test_df_reset,
+        y_true_dept=y_true_dept,
+        y_pred_dept=y_pred_dept,
+        y_true_sent=y_true_sent,
+        y_pred_sent=y_pred_sent,
+        max_examples=5,
+        out_csv_path=amb_errors_csv
+    )
+
+    print(f"Salvati esempi di errori ambigui in: {amb_errors_csv}")
+    
     sent_acc = accuracy_score(y_test_sent, y_pred_sent)
     sent_f1_macro = f1_score(y_test_sent, y_pred_sent, average="macro")
 
